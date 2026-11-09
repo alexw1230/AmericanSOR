@@ -7,7 +7,7 @@ Supervisor: Professor Yuefan Deng, AMS Department, Stony Brook University
 ## Project Description ##
 This project prices an American option on two assets by solving the Black-Scholes PDE on a 2D grid. I parallelized the solver with MPI and ran the experiments on the SeaWulf supercomputer cluster.
 
-At each time step, the PDE produces a sparse system with a five-point finite-difference stencil. I solve each system using projected SOR (PSOR), which applies the payoff constraint through a `max()` operation after every update. The solver uses 2D domain decomposition and red-black ordering. I tested all combinations of `N = {128, 256, 512, 1024}` and `P = {1, 2, 4, 16, 64}`, where N is the number of interior grid nodes per side and P is the number of MPI processes. I checked the results against a serial run and against the closed-form price of the corresponding European option.
+At each time step, the PDE produces a sparse system with a five-point finite-difference stencil. I solve each system using projected successive over-relaxation (PSOR), which applies the payoff constraint through a `max()` operation after every update. The solver uses 2D domain decomposition and red-black ordering. I tested all combinations of `N = {128, 256, 512, 1024}` and `P = {1, 2, 4, 16, 64}`, where N is the number of interior grid nodes per side and P is the number of MPI processes. I checked the results against a serial run and against the closed-form price of the corresponding European option.
 
 ## Problem Statement ##
 Problem 3.5 (contributed by A.W.): Pricing of 2-Asset American Options by Projected SOR.
@@ -75,14 +75,14 @@ $$\rho_J = \frac{2\left(\sqrt{c_{x+}c_{x-}} + \sqrt{c_{y+}c_{y-}}\right)\cos\lef
 This gives $\omega$ = 1.217, 1.460, 1.677, 1.823 for N = 128, 256, 512, 1024.
 
 ### Data Distribution ###
-The P ranks form a $p_x \times p_y$ Cartesian grid (`MPI_Cart_create`), so P = 2, 4, 16, 64 give 2×1, 2×2, 4×4 and 8×8. Each rank owns an equal block of the grid plus one layer of ghost nodes holding its neighbors' edge values.
+The P ranks form a $p_x \times p_y$ Cartesian grid (`MPI_Cart_create`), so P = 2, 4, 16, 64 give 2×1, 2×2, 4×4 and 8×8. Each rank has an equal block of the grid plus one layer of ghost nodes holding its neighbors' edge values.
 
 ![decomp](Images/decomp.png)
 
-In the five-point stencil, every neighbor of a red node is black and vice versa, so all red nodes are updated in parallel, the edges are exchanged, then all black nodes. The color comes from global indices, $(i + j) \bmod 2$, so every rank agrees on the checkerboard, and since update order within a color doesn't matter, the result is the same for any P.
+In the five-point stencil, every neighbor of a red node is black and vice versa, so all red nodes are updated in parallel, the edges are exchanged, then all black nodes. The color comes from global indices, $(i + j) \bmod 2$, so every rank agrees on the checkerboard. Since update order within a color doesn't matter, the result is the same for any P.
 
 ### Load Balancing & Communication ###
-Every block is the same size and all ranks stop on the same global convergence test, so every rank does the same work. The moving early-exercise region only changes whether the `max()` is active, not the cost of a node, so no dynamic load balancing is needed.
+Every block is the same size and all ranks stop on the same global convergence test, so every rank does the same work. The moving early-exercise region only changes whether the `max()` is active, not the cost of a node, so dynamic load balancing is not needed.
 
 | Phase | Style | Per-Rank Data Size | Per Iteration |
 | -------- | -------- | -------- | -------- |
@@ -93,7 +93,7 @@ Columns are sent with an `MPI_Type_vector`, and ranks on the physical boundary h
 
 $$\frac{\text{comm}}{\text{comp}} \propto \frac{4N/\sqrt{P}}{N^2/P} = \frac{4\sqrt{P}}{N}$$
 
-so larger meshes should scale better, while the `MPI_Allreduce` adds a latency cost every iteration that doesn't shrink with N.
+so larger meshes should scale better, while the MPI allreduce adds a latency cost every iteration that doesn't shrink with N.
 
 ### Pseudocode ###
 
@@ -102,7 +102,7 @@ MPI_Init()
 read N, M, reps
 coef = stencil(N, M)          //c0, cx+, cx-, cy+, cy-
 omega = optimal_omega(coef)
-create px x py Cartesian grid, find neighbors
+create px x py cart grid, find neighbors
 allocate u, rhs, payoff g    //(nx+2) x (ny+2) incl. ghosts
 
 FUNCTION solve():
@@ -200,42 +200,44 @@ Plots and tables are made with `python Python/plot_results.py results/<jobid>`.
 
 ### Correctness ###
 
-**Against the serial run.** For every mesh size, all 15 runs (5 values of P × 3 repetitions) gave the same price and iteration count, and a hash of the full grid confirmed the parallel solution is bitwise identical to the serial one.
+For every mesh size, all 15 runs (5 values of P × 3 repetitions) gave the same price and iteration count, and a hash of the full grid confirmed the parallel solution is bitwise identical to the serial one.
 
 | N | Iterations (all P) | Price (all P) |
 | -------- | -------- | -------- |
-| 128 | 1300 | 5.786137 |
-| 256 | 2351 | 5.787579 |
-| 512 | 4380 | 5.787939 |
-| 1024 | 8299 | 5.788027 |
+| 128 | 1300 | 5.7861 |
+| 256 | 2351 | 5.7876 |
+| 512 | 4380 | 5.7879 |
+| 1024 | 8299 | 5.7880 |
 
-**Against the closed-form European price** of 5.437767 (N = 512, P = 16, run with `-e`):
+Against the closed-form European price of 5.4378 (N = 512, P = 16, run with `-e`):
 
 | M | Numerical | Error |
 | -------- | -------- | -------- |
-| 100 | 5.428783 | $9.0 \times 10^{-3}$ |
-| 400 | 5.435462 | $2.3 \times 10^{-3}$ |
+| 100 | 5.4288 | 0.008984 |
+| 400 | 5.4355 | 0.002305 |
 
-4x more time steps gives 3.9x less error, as expected for first-order implicit Euler, so the remaining error comes from time stepping, not the solver. The American price is about 0.35 higher than the European, which is the early-exercise premium, and each doubling of N changes it about a quarter as much as the last ($1.4 \times 10^{-3}$, $3.6 \times 10^{-4}$, $8.8 \times 10^{-5}$), consistent with second-order central differences.
+4x more time steps gives 3.9x less error, as expected for first-order implicit Euler, so the remaining error comes from time stepping, not the solver. The American price is about 0.35 higher than the European, which is the early-exercise premium, and each doubling of N changes it about a quarter as much as the last (0.001442, 0.000360, 0.000088), consistent with second-order central differences.
 
 ### Execution Time ###
 
+All times in ms.
+
 | N | Serial | $P = 2$ | $P = 2^2$ | $P = 2^4$ | $P = 2^6$ |
 | -------- | -------- | -------- | -------- | -------- | -------- |
-| $2^7$ | 75.6 ms | 62.6 ms | 36.4 ms | 30.2 ms | 36.6 ms |
-| $2^8$ | 0.463 s | 0.223 s | 0.140 s | 0.091 s | 0.101 s |
-| $2^9$ | 2.617 s | 1.378 s | 0.835 s | 0.393 s | 0.176 s |
-| $2^{10}$ | 19.31 s | 9.849 s | 5.140 s | 1.500 s | 0.743 s |
+| $2^7$ | 75.607 | 62.584 | 36.404 | 30.228 | 36.607 |
+| $2^8$ | 463.141 | 223.030 | 140.005 | 91.410 | 101.178 |
+| $2^9$ | 2616.748 | 1378.004 | 834.908 | 393.395 | 175.954 |
+| $2^{10}$ | 19307.412 | 9849.227 | 5140.263 | 1499.849 | 742.548 |
 
 ### Speedup ###
 $S = T(N,1) / T(N,P)$
 
 | N | $P = 2$ | $P = 2^2$ | $P = 2^4$ | $P = 2^6$ |
 | -------- | -------- | -------- | -------- | -------- |
-| $2^7$ | 1.21x | 2.08x | 2.50x | 2.07x |
-| $2^8$ | 2.08x | 3.31x | 5.07x | 4.58x |
-| $2^9$ | 1.90x | 3.13x | 6.65x | 14.87x |
-| $2^{10}$ | 1.96x | 3.76x | 12.87x | 26.00x |
+| $2^7$ | 1.208x | 2.077x | 2.501x | 2.065x |
+| $2^8$ | 2.077x | 3.308x | 5.067x | 4.577x |
+| $2^9$ | 1.899x | 3.134x | 6.652x | 14.872x |
+| $2^{10}$ | 1.960x | 3.756x | 12.873x | 26.002x |
 
 ![speedup](Images/speedup.png)
 
@@ -244,37 +246,37 @@ $E = S/P$
 
 | N | $P = 2$ | $P = 2^2$ | $P = 2^4$ | $P = 2^6$ |
 | -------- | -------- | -------- | -------- | -------- |
-| $2^7$ | 0.60 | 0.52 | 0.16 | 0.03 |
-| $2^8$ | 1.04 | 0.83 | 0.32 | 0.07 |
-| $2^9$ | 0.95 | 0.78 | 0.42 | 0.23 |
-| $2^{10}$ | 0.98 | 0.94 | 0.80 | 0.41 |
+| $2^7$ | 0.604 | 0.519 | 0.156 | 0.032 |
+| $2^8$ | 1.038 | 0.827 | 0.317 | 0.072 |
+| $2^9$ | 0.949 | 0.784 | 0.416 | 0.232 |
+| $2^{10}$ | 0.980 | 0.939 | 0.805 | 0.406 |
 
 For $N = 2^{10}$, scaling is close to linear up to 16 cores and reaches 26x on 64. For $N = 2^7$ and $2^8$, P = 16 is faster than P = 64, since each rank has too little work to cover the communication.
 
 ## Performance Analysis ##
 
 ### Communication vs Computation ###
-Share of total time spent in halo exchanges and the `MPI_Allreduce`:
+Share of total time spent in halo exchanges and the MPI allreduce:
 
 | N | $P = 2$ | $P = 2^2$ | $P = 2^4$ | $P = 2^6$ |
 | -------- | -------- | -------- | -------- | -------- |
-| $2^7$ | 13.3% | 34.5% | 78.7% | 94.5% |
-| $2^8$ | 11.9% | 19.4% | 56.0% | 88.9% |
-| $2^9$ | 4.1% | 15.8% | 37.8% | 58.3% |
-| $2^{10}$ | 1.1% | 4.7% | 17.5% | 38.2% |
+| $2^7$ | 13.309% | 34.485% | 78.656% | 94.484% |
+| $2^8$ | 11.884% | 19.358% | 56.039% | 88.909% |
+| $2^9$ | 4.123% | 15.762% | 37.798% | 58.312% |
+| $2^{10}$ | 1.058% | 4.707% | 17.475% | 38.247% |
 
 This follows the $4\sqrt{P}/N$ ratio: the share falls as N grows and rises as P grows. At P = 64, communication takes about 20–40 µs per iteration for every mesh size, while compute per iteration ranges from about 1.5 µs at $N = 2^7$ to 55 µs at $N = 2^{10}$. The messages are small enough at that point (128 doubles per edge at $N = 2^{10}$) that the cost is mostly fixed latency, and only the largest mesh has enough compute to stay ahead of it.
 
 ### Iterations & Load Balance ###
 Iterations per time step roughly double each time N doubles (13, 24, 44, 83), matching the $O(N)$ growth of optimally tuned SOR, compared with $O(N^2)$ for plain Gauss-Seidel. The count is the same for every P, so it doesn't affect speedup.
 
-The slowest rank's compute time stayed within 1.00–1.25 of the average in every run. Since the work per rank is identical, that variation is from hardware effects such as cache and clock speed, and the moving early-exercise boundary caused no noticeable imbalance.
+The slowest rank's compute time stayed between 1.00 and 1.25 times the average in every run. Since the work per rank is identical, that variation is most likely from hardware effects such as cache and clock speed, and the moving early-exercise boundary caused no noticeable imbalance.
 
 ### Run-to-Run Variance ###
-Unlike Project 2, I did not use an untimed warmup, and the first repetition was often the slowest (serial $N = 2^8$: 0.653, 0.463, 0.354 s), possibly from CPU frequency ramp-up. The median handles most of this, but the smallest runs ($N \le 2^8$) are the least reliable, and the $E = 1.04$ at $(2^8, 2)$ is likely noise. A rerun should add a warmup.
+Since I was using median values, I did not use an untimed warmup, and the first repetition was often the slowest (serial $N = 2^8$: 652.739, 463.141, 353.881 ms), possibly from CPU frequency ramp-up. This likely also explains the E = 1.038 at $(2^8, 2)$.
 
 ### Scalability ###
 - Speedup increases as the block size $N/\sqrt{P}$ increases
 - Communication per rank scales with $N/\sqrt{P}$, computation with $N^2/P$
-- Every iteration has a fixed latency cost (2 halo exchanges and an `MPI_Allreduce`) that sets a floor for small meshes
-- Time steps are sequential, so all parallelism comes from within each solve
+- Every iteration has a fixed latency cost (2 halo exchanges and an MPI allreduce) that limits efficiency for small meshes
+- Time steps are sequential, so all parallel speedup comes from within each solve
